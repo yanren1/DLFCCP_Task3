@@ -197,7 +197,13 @@ class CNNAutoencoder(nn.Module):
 
 
 if __name__ == '__main__':
-    model = CapsuleNet(num_classes=10)
-    sample = torch.randn([17, 3, 32, 32])
+    model = CNNAutoencoder(in_channels=3,
+                encoder_channels=[16,32],
+                decoder_channels=[32,16],
+                num_features=1024,
+                num_classes=10,
+                norm_layer= nn.BatchNorm2d,
+                dropout=0.1)
+    sample = torch.randn([32, 3, 28, 28])
     out = model(sample)
     print(out.shape)
