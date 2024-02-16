@@ -13,8 +13,11 @@ from tqdm import tqdm
 import numpy as np
 from backbone.model import MyResnet18,simpleMLP,Myregnet16,SparseAutoencoder,CNNAutoencoder
 from backbone.ghostnetv2_torch import MyGhostnetv2,ghostnetv2
+from backbone.capsnet import CapsNet,CapsConfig
 from PIL import Image, ImageDraw, ImageFont
 import time
+from torch.autograd import Variable
+from tqdm import tqdm
 
 
 
@@ -42,19 +45,21 @@ def train():
         # transforms.RandomHorizontalFlip(),
         # transforms.RandomRotation(degrees=30),
         transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
     transform_val = transforms.Compose([
         transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
 
 
-    train_dataset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform_train)
-    val_dataset = torchvision.datasets.FashionMNIST(root='./data', train=False, download=True, transform=transform_val)
+    # train_dataset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform_train)
+    # val_dataset = torchvision.datasets.FashionMNIST(root='./data', train=False, download=True, transform=transform_val)
 
-    # train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-    # val_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_val)
+    train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
+    val_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_val)
 
-    batch_size = int(1024)
+    batch_size = int(512)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -67,7 +72,7 @@ def train():
 
 
     model_type = ['ae','sparse_ae','cnn_ae','ghostnet','resnet','regnet','CapsNet']
-    model_type = model_type[2]
+    model_type = model_type[-1]
 
     # backbone
     if model_type =='resnet':
@@ -100,6 +105,10 @@ def train():
                        norm_layer=nn.BatchNorm2d,
                        dropout=0.1).cuda()
 
+    elif model_type == 'CapsNet':
+        model_config = CapsConfig('cifar10')
+        # model_config = CapsConfig('mnist')
+        backbone = CapsNet(model_config).cuda()
 
 
     criterion = nn.CrossEntropyLoss().cuda()
@@ -115,7 +124,7 @@ def train():
 
     # set lr,#epoch, optimizer and scheduler
     lr = 1e-3
-    num_epoch = 100
+    num_epoch = 50
     optimizer = optim.Adam(
         backbone.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-5, amsgrad=False)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epoch, eta_min=8e-5)
@@ -129,55 +138,87 @@ def train():
     backbone.train()
     for epoch in range(num_epoch):
         loss_list = []
-        for sample, target in train_loader:
+        for sample, target in tqdm(train_loader):
             backbone.zero_grad()
             # print(sample.shape, target.shape)
-            sample, target = sample.cuda(), target.cuda()
+            # sample, target = sample.cuda(), target.cuda()
             # print(sample, target)
+
             if model_type =='sparse_ae':
+                sample, target = sample.cuda(), target.cuda()
                 output,activations = backbone(sample)
                 loss = criterion(output, target) + backbone.compute_sparsity_loss(activations) * 0.1
 
+            elif model_type =='CapsNet':
+                target = torch.sparse.torch.eye(10).index_select(dim=0, index=target)
+                sample, target = Variable(sample), Variable(target)
+                sample, target = sample.cuda(), target.cuda()
+
+                output, reconstructions, masked = backbone(sample)
+                loss = backbone.loss(sample, output, target, reconstructions).cuda()
+
             else:
+                sample, target = sample.cuda(), target.cuda()
                 output = backbone(sample)
                 loss = criterion(output, target)
 
             loss.backward()
-
             optimizer.step()
             loss_list.append(loss.item())
 
         scheduler.step()
 
         if (epoch+1) % 1 == 0 or epoch==0:
-            print(f'\r Epoch:{epoch} ce loss = {np.mean(loss_list)} ,lr = {optimizer.param_groups[0]["lr"]}     ', end = ' ')
+            # print(f'\r Epoch:{epoch} ce loss = {np.mean(loss_list)} ,lr = {optimizer.param_groups[0]["lr"]}     ', end = ' ')
+            tqdm.write(f'\r Epoch:{epoch} ce loss = {np.mean(loss_list)} ,lr = {optimizer.param_groups[0]["lr"]}     ',)
             writer.add_scalar('Training CE Loss', np.mean(loss_list), epoch)
             writer.add_scalar('Learning rate', optimizer.param_groups[0]["lr"], epoch)
 
         # valing and save
         if (epoch+1) % 10 == 0 or epoch==0:
-            print('Valing.....')
+            # print('Valing.....')
+            tqdm.write('Valing.....')
             val_loss_list = []
             backbone.eval()
             correct = 0
             total = 0
             with torch.no_grad():
-                for val_batch in val_loader:
-                    val_sample, val_target = val_batch
-                    val_sample, val_target = val_sample.cuda(), val_target.cuda()
+                for val_sample, val_target in val_loader:
+                    # val_sample, val_target = val_sample.cuda(), val_target.cuda()
 
                     if model_type == 'sparse_ae':
+                        val_sample, val_target = val_sample.cuda(), val_target.cuda()
                         output,activations = backbone(val_sample)
                         val_loss = criterion_val(output, val_target)+ backbone.compute_sparsity_loss(activations) * 0.1
+
+                        val_loss_list.append(val_loss.item())
+                        _, predicted = torch.max(output.data, 1)
+                        total += val_target.size(0)
+                        correct += (predicted == val_target).sum().item()
+
+                    elif model_type == 'CapsNet':
+                        val_target = torch.sparse.torch.eye(10).index_select(dim=0, index=val_target)
+                        val_sample, val_target = Variable(val_sample), Variable(val_target)
+                        val_sample, val_target = val_sample.cuda(), val_target.cuda()
+
+                        output, reconstructions, masked = backbone(val_sample)
+                        val_loss = backbone.loss(val_sample, output, val_target, reconstructions)
+
+                        val_loss_list.append(val_loss.item())
+                        total += val_sample.shape[0]
+                        correct += sum(np.argmax(masked.data.cpu().numpy(), 1) ==
+                                       np.argmax(val_target.data.cpu().numpy(), 1))
+
                     else:
+                        val_sample, val_target = val_sample.cuda(), val_target.cuda()
                         output = backbone(val_sample)
                         val_loss = criterion_val(output, val_target)
 
-                    val_loss_list.append(val_loss.item())
+                        val_loss_list.append(val_loss.item())
+                        _, predicted = torch.max(output.data, 1)
+                        total += val_target.size(0)
+                        correct += (predicted == val_target).sum().item()
 
-                    _, predicted = torch.max(output.data, 1)
-                    total += val_target.size(0)
-                    correct += (predicted == val_target).sum().item()
 
             Train_ce = np.mean(loss_list)
             val_ce = np.mean(val_loss_list)
@@ -188,6 +229,9 @@ def train():
 
             print(f'VAL Epoch:{epoch} Train ce = {Train_ce}, '
                   f'val ce = {val_ce} , val accuracy = {accuracy}')
+            tqdm.write(f'VAL Epoch:{epoch} Train ce = {Train_ce}, '
+                  f'val ce = {val_ce} , val accuracy = {accuracy}')
+
             print()
             # save_model(model_save_pth,backbone, epoch, Train_ce, accuracy)
             backbone.train()
