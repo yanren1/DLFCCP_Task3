@@ -36,7 +36,7 @@ def train():
 
     debug = False
     use_pretrain = False
-    task = 'denoise'
+
 
     # split train and val set
     transform_train = transforms.Compose([
@@ -69,7 +69,8 @@ def train():
         drop_last=True,
     )
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
-
+    task = 'denoise'
+    noise_ratio = 0.3
 
     model_type = ['ae','sparse_ae','cnn_ae','ghostnet','resnet','regnet','CapsNet']
     model_type = model_type[2]
@@ -114,6 +115,7 @@ def train():
     criterion = nn.CrossEntropyLoss().cuda()
     criterion = nn.MSELoss().cuda()
     criterion_val = nn.CrossEntropyLoss().cuda().eval()
+    criterion_val = nn.MSELoss().cuda()
 
     # try read pre-train model
     if use_pretrain:
@@ -161,14 +163,12 @@ def train():
 
             else:
                 if task == 'denoise':
-                    sample_noise = sample + 0.5 * torch.randn_like(sample)
-                    # print('#'*30)
-                    # print(sample_noise.shape)
-                    # print(sample.shape)
-
+                    sample_noise = sample + noise_ratio * torch.randn_like(sample)
                     sample, target, sample_noise = sample.cuda(), target.cuda(), sample_noise.cuda()
+
+
                     output = backbone(sample_noise)
-                    loss = criterion(output, sample_noise)
+                    loss = criterion(output, sample)
                 else:
                     sample, target = sample.cuda(), target.cuda()
                     output = backbone(sample)
@@ -190,7 +190,7 @@ def train():
             writer.add_scalar('Learning rate', optimizer.param_groups[0]["lr"], epoch)
 
         # valing and save
-        if (epoch+1) % 10 == 0 or epoch==0:
+        if (epoch+1) % 5 == 0 or epoch==0:
             # print('Valing.....')
             tqdm.write('Valing.....')
             val_loss_list = []
@@ -226,7 +226,7 @@ def train():
 
                     else:
                         if task == 'denoise':
-                            val_sample_noisy =val_sample +  0.5 * torch.randn_like(val_sample)
+                            val_sample_noisy =val_sample +  noise_ratio * torch.randn_like(val_sample)
                             val_sample, val_target, val_sample_noisy  = val_sample.cuda(), val_target.cuda(),val_sample_noisy.cuda()
                             output = backbone(val_sample_noisy)
 
@@ -235,6 +235,12 @@ def train():
                             writer.add_images('Denoised Images', output[:10], global_step=epoch+1)
 
                             val_loss = criterion_val(output, val_sample)
+
+                            correct_t = (torch.abs(output - val_sample) < 0.1).sum().item()
+
+                            correct += correct_t
+                            total += val_sample.numel()
+
                         else:
                             val_sample, val_target = val_sample.cuda(), val_target.cuda()
                             output = backbone(val_sample)
@@ -249,10 +255,9 @@ def train():
 
             Train_ce = np.mean(loss_list)
             val_ce = np.mean(val_loss_list)
-            if task != 'denoise':
-                accuracy = correct / total
-            else:
-                accuracy = 0
+
+            accuracy = correct / total
+
             writer.add_scalar('Validation ce', val_ce, epoch + 1)
             writer.add_scalar('Validation accuracy', accuracy, epoch + 1)
 
