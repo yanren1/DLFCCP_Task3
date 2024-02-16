@@ -11,8 +11,7 @@ from torchvision.transforms import transforms
 
 from tqdm import tqdm
 import numpy as np
-from backbone.model import MyResnet18,simpleMLP,SimpleCNN,Myregnet16
-from dataloader.dataloader import XORDataset
+from backbone.model import MyResnet18,simpleMLP,Myregnet16,SparseAutoencoder,CNNAutoencoder
 from backbone.ghostnetv2_torch import MyGhostnetv2,ghostnetv2
 from PIL import Image, ImageDraw, ImageFont
 import time
@@ -39,9 +38,9 @@ def train():
     # split train and val set
     transform_train = transforms.Compose([
         # transforms.RandomResizedCrop(size = 28),
-        transforms.ColorJitter(),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(degrees=30),
+        # transforms.ColorJitter(),
+        # transforms.RandomHorizontalFlip(),
+        # transforms.RandomRotation(degrees=30),
         transforms.ToTensor(),
     ])
     transform_val = transforms.Compose([
@@ -49,13 +48,13 @@ def train():
     ])
 
 
-    # train_dataset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform_train)
-    # val_dataset = torchvision.datasets.FashionMNIST(root='./data', train=False, download=True, transform=transform_val)
+    train_dataset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform_train)
+    val_dataset = torchvision.datasets.FashionMNIST(root='./data', train=False, download=True, transform=transform_val)
 
-    train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-    val_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_val)
+    # train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
+    # val_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_val)
 
-    batch_size = int(512)
+    batch_size = int(1024)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -67,8 +66,8 @@ def train():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
 
 
-    model_type = ['ae','ghostnet','resnet','regnet']
-    model_type = model_type[1]
+    model_type = ['ae','sparse_ae','cnn_ae','ghostnet','resnet','regnet','CapsNet']
+    model_type = model_type[2]
 
     # backbone
     if model_type =='resnet':
@@ -81,9 +80,26 @@ def train():
     elif model_type == 'ae':
         backbone = simpleMLP(in_channels=784,
                              # hidden_channels=[128,784,18],
-                             hidden_channels=[4096,2048,1024,2048,4096,18],
+                             hidden_channels=[784,784,784,784,784,18],
                              norm_layer=nn.BatchNorm1d,
                              dropout=0, inplace=False, use_sigmoid=False).cuda()
+    elif model_type == 'sparse_ae':
+        backbone = SparseAutoencoder(in_channels=784,
+                             # hidden_channels=[128,784,18],
+                             encoder_channels=[1024,2048],
+                             decoder_channels=[1024,784,18],
+
+                             norm_layer=nn.BatchNorm1d,
+                             dropout=0, inplace=False).cuda()
+    elif model_type == 'cnn_ae':
+        backbone = CNNAutoencoder(in_channels=1,
+                       encoder_channels=[128, 64, 32, 16],
+                       decoder_channels=[16, 32, 64, 128],
+                       num_features=1024,
+                       num_classes=10,
+                       norm_layer=nn.BatchNorm2d,
+                       dropout=0.1).cuda()
+
 
 
     criterion = nn.CrossEntropyLoss().cuda()
@@ -118,8 +134,13 @@ def train():
             # print(sample.shape, target.shape)
             sample, target = sample.cuda(), target.cuda()
             # print(sample, target)
-            output = backbone(sample)
-            loss = criterion(output, target)
+            if model_type =='sparse_ae':
+                output,activations = backbone(sample)
+                loss = criterion(output, target) + backbone.compute_sparsity_loss(activations) * 0.1
+
+            else:
+                output = backbone(sample)
+                loss = criterion(output, target)
 
             loss.backward()
 
@@ -145,8 +166,13 @@ def train():
                     val_sample, val_target = val_batch
                     val_sample, val_target = val_sample.cuda(), val_target.cuda()
 
-                    output = backbone(val_sample)
-                    val_loss = criterion_val(output, val_target)
+                    if model_type == 'sparse_ae':
+                        output,activations = backbone(val_sample)
+                        val_loss = criterion_val(output, val_target)+ backbone.compute_sparsity_loss(activations) * 0.1
+                    else:
+                        output = backbone(val_sample)
+                        val_loss = criterion_val(output, val_target)
+
                     val_loss_list.append(val_loss.item())
 
                     _, predicted = torch.max(output.data, 1)

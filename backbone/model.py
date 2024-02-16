@@ -49,7 +49,6 @@ class simpleMLP(nn.Module):
         return x
 
 
-
 def MyResnet18(pretrained=True,num_classes = 1000,in_channels = 3):
     model = resnet18(pretrained=pretrained)
 
@@ -60,6 +59,7 @@ def MyResnet18(pretrained=True,num_classes = 1000,in_channels = 3):
         model.conv1 = nn.Conv2d(in_channels, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
 
     return model
+
 
 def Myregnet16(pretrained=True,num_classes = 1000,in_channels = 3):
     model = regnet_y_1_6gf(pretrained=pretrained)
@@ -76,42 +76,128 @@ def Myregnet16(pretrained=True,num_classes = 1000,in_channels = 3):
     return model
 
 
-class SimpleCNN(nn.Module):
-    def __init__(self):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1)
-        self.relu1 = nn.ReLU()
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+class SparseAutoencoder(nn.Module):
+    def __init__(self,
+                in_channels: int,
+                encoder_channels: List[int],
+                decoder_channels: List[int],
+                norm_layer: Optional[Callable[..., torch.nn.Module]] = None,
+                activation_layer: Optional[Callable[..., torch.nn.Module]] = torch.nn.ReLU,
+                inplace: Optional[bool] = None,
+                bias: bool = True,
+                dropout: float = 0.0,
+                sparsity_target=0.1,
 
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
-        self.relu2 = nn.ReLU()
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+                ):
+        super(SparseAutoencoder, self).__init__()
+        params = {} if inplace is None else {"inplace": inplace}
 
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
-        self.relu3 = nn.ReLU()
-        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.sparsity_target = sparsity_target
 
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(128 * 7 * 7, 256)
-        self.relu3 = nn.ReLU()
-        self.fc2 = nn.Linear(256, 10)  # 输出层有10个类别
+        encoder_layers = []
+        in_dim = in_channels
+        for hidden_dim in encoder_channels:
+            encoder_layers.append(torch.nn.Linear(in_dim, hidden_dim, bias=bias))
+            if norm_layer is not None:
+                encoder_layers.append(norm_layer(hidden_dim))
+            encoder_layers.append(activation_layer(**params))
+            encoder_layers.append(torch.nn.Dropout(dropout, **params))
+            in_dim = hidden_dim
+        self.encoder = nn.Sequential(*encoder_layers)
+
+        decoder_layers = []
+        in_dim = encoder_channels[-1]
+        for hidden_dim in decoder_channels[:-1]:
+            decoder_layers.append(torch.nn.Linear(in_dim, hidden_dim, bias=bias))
+            if norm_layer is not None:
+                decoder_layers.append(norm_layer(hidden_dim))
+            decoder_layers.append(activation_layer(**params))
+            decoder_layers.append(torch.nn.Dropout(dropout, **params))
+            in_dim = hidden_dim
+
+        decoder_layers.append(torch.nn.Linear(in_dim, decoder_channels[-1], bias=bias))
+        decoder_layers.append(torch.nn.Dropout(dropout, **params))
+        self.decoder = nn.Sequential(*decoder_layers)
 
     def forward(self, x):
-        x = self.relu1(self.conv1(x))
-        x = self.relu2(self.conv2(x))
-        x = self.relu3(self.conv3(x))
-        x = self.flatten(x)
-        x = self.relu3(self.fc1(x))
-        x = self.fc2(x)
+        # print(x.shape)
+        x = x.view(x.size(0), -1)
+        encoder = self.encoder(x)
+        out = self.decoder(encoder)
+
+        # print(x.shape)
+        return out,encoder
+
+    def compute_sparsity_loss(self, activation):
+        # Compute the average activation of each hidden unit
+        average_activation = torch.mean(activation, dim=0)
+
+        # Sparsity loss using Kullback-Leibler (KL) divergence
+        sparsity_loss = torch.sum(self.sparsity_target * torch.log(self.sparsity_target / average_activation) +
+                                  (1 - self.sparsity_target) * torch.log(
+            (1 - self.sparsity_target) / (1 - average_activation)))
+
+        return sparsity_loss
+
+
+class CNNAutoencoder(nn.Module):
+    def __init__(self,
+                in_channels: int,
+                encoder_channels: List[int],
+                decoder_channels: List[int],
+                num_features: int,
+                num_classes: int,
+                norm_layer: Optional[Callable[..., torch.nn.Module]] = None,
+                activation_layer: Optional[Callable[..., torch.nn.Module]] = torch.nn.ReLU,
+                inplace: Optional[bool] = None,
+                dropout: float = 0.0,
+
+                ):
+        super(CNNAutoencoder, self).__init__()
+        params = {} if inplace is None else {"inplace": inplace}
+
+        encoder_layers = []
+        in_dim = in_channels
+        for hidden_dim in encoder_channels:
+            encoder_layers.append(nn.Conv2d(in_dim, hidden_dim, kernel_size=3, stride=2, padding=1))
+            if norm_layer is not None:
+                encoder_layers.append(norm_layer(hidden_dim))
+            encoder_layers.append(activation_layer(**params))
+            encoder_layers.append(torch.nn.Dropout(dropout, **params))
+            in_dim = hidden_dim
+        self.encoder = nn.Sequential(*encoder_layers)
+
+        decoder_layers = []
+        in_dim = encoder_channels[-1]
+        for hidden_dim in decoder_channels:
+            decoder_layers.append(nn.ConvTranspose2d(in_dim, hidden_dim, kernel_size=3, stride=2, padding=1,output_padding=1))
+            if norm_layer is not None:
+                decoder_layers.append(norm_layer(hidden_dim))
+            decoder_layers.append(activation_layer(**params))
+            decoder_layers.append(torch.nn.Dropout(dropout, **params))
+            in_dim = hidden_dim
+        self.decoder = nn.Sequential(*decoder_layers)
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(decoder_channels[-1] * 32 * 32, num_features),
+            nn.ReLU(),
+            nn.Linear(num_features, num_classes)
+        )
+
+    def forward(self, x):
+
+        x = self.encoder(x)
+        x = self.decoder(x)
+        # print(x.shape)
+        x = self.classifier(x)
+
         return x
 
 
+
 if __name__ == '__main__':
-    model = Myregnet16(pretrained=True,num_classes = 18,in_channels = 1)
-    sample = torch.randn([512, 1, 28, 28])
-    # weights = ResNet18_Weights.DEFAULT
-    # preprocess = weights.transforms()
-    # print(preprocess)
+    model = CapsuleNet(num_classes=10)
+    sample = torch.randn([17, 3, 32, 32])
     out = model(sample)
     print(out.shape)
-    # print(model)
