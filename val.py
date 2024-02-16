@@ -19,7 +19,7 @@ backbone = simpleMLP(in_channels=7,
                      dropout=0, inplace=False, use_sigmoid=False).cuda()
 
 if use_pretrain:
-    weights_pth = 'final.pt'
+    weights_pth = 'final0.pt'
     try:
         backbone.load_state_dict(torch.load(weights_pth))
     except:

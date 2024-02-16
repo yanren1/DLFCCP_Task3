@@ -159,7 +159,7 @@ class CNNAutoencoder(nn.Module):
         encoder_layers = []
         in_dim = in_channels
         for hidden_dim in encoder_channels:
-            encoder_layers.append(nn.Conv2d(in_dim, hidden_dim, kernel_size=3, stride=2, padding=1))
+            encoder_layers.append(nn.Conv2d(in_dim, hidden_dim, kernel_size=3, stride=1, padding=1))
             if norm_layer is not None:
                 encoder_layers.append(norm_layer(hidden_dim))
             encoder_layers.append(activation_layer(**params))
@@ -170,17 +170,17 @@ class CNNAutoencoder(nn.Module):
         decoder_layers = []
         in_dim = encoder_channels[-1]
         for hidden_dim in decoder_channels:
-            decoder_layers.append(nn.ConvTranspose2d(in_dim, hidden_dim, kernel_size=3, stride=2, padding=1,output_padding=1))
+            decoder_layers.append(nn.ConvTranspose2d(in_dim, hidden_dim, kernel_size=3, stride=1, padding=1))
             if norm_layer is not None:
                 decoder_layers.append(norm_layer(hidden_dim))
             decoder_layers.append(activation_layer(**params))
             decoder_layers.append(torch.nn.Dropout(dropout, **params))
             in_dim = hidden_dim
+        decoder_layers.append(nn.Conv2d(in_dim, in_channels, kernel_size=3, stride=1, padding=1))
         self.decoder = nn.Sequential(*decoder_layers)
-
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(decoder_channels[-1] * 32 * 32, num_features),
+            nn.Linear(decoder_channels[-1] * 28 * 28, num_features),
             nn.ReLU(),
             nn.Linear(num_features, num_classes)
         )
@@ -190,7 +190,7 @@ class CNNAutoencoder(nn.Module):
         x = self.encoder(x)
         x = self.decoder(x)
         # print(x.shape)
-        x = self.classifier(x)
+        # x = self.classifier(x)
 
         return x
 

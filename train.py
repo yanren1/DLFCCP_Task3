@@ -36,7 +36,7 @@ def train():
 
     debug = False
     use_pretrain = False
-
+    task = 'denoise'
 
     # split train and val set
     transform_train = transforms.Compose([
@@ -45,21 +45,21 @@ def train():
         # transforms.RandomHorizontalFlip(),
         # transforms.RandomRotation(degrees=30),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
     transform_val = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
 
 
-    # train_dataset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform_train)
-    # val_dataset = torchvision.datasets.FashionMNIST(root='./data', train=False, download=True, transform=transform_val)
+    train_dataset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform_train)
+    val_dataset = torchvision.datasets.FashionMNIST(root='./data', train=False, download=True, transform=transform_val)
 
-    train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-    val_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_val)
+    # train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
+    # val_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_val)
 
-    batch_size = int(512)
+    batch_size = int(1024)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -72,7 +72,7 @@ def train():
 
 
     model_type = ['ae','sparse_ae','cnn_ae','ghostnet','resnet','regnet','CapsNet']
-    model_type = model_type[-1]
+    model_type = model_type[2]
 
     # backbone
     if model_type =='resnet':
@@ -112,6 +112,7 @@ def train():
 
 
     criterion = nn.CrossEntropyLoss().cuda()
+    criterion = nn.MSELoss().cuda()
     criterion_val = nn.CrossEntropyLoss().cuda().eval()
 
     # try read pre-train model
@@ -150,6 +151,7 @@ def train():
                 loss = criterion(output, target) + backbone.compute_sparsity_loss(activations) * 0.1
 
             elif model_type =='CapsNet':
+
                 target = torch.sparse.torch.eye(10).index_select(dim=0, index=target)
                 sample, target = Variable(sample), Variable(target)
                 sample, target = sample.cuda(), target.cuda()
@@ -158,9 +160,22 @@ def train():
                 loss = backbone.loss(sample, output, target, reconstructions).cuda()
 
             else:
-                sample, target = sample.cuda(), target.cuda()
-                output = backbone(sample)
-                loss = criterion(output, target)
+                if task == 'denoise':
+                    sample_noise = sample + 0.5 * torch.randn_like(sample)
+                    # print('#'*30)
+                    # print(sample_noise.shape)
+                    # print(sample.shape)
+
+                    sample, target, sample_noise = sample.cuda(), target.cuda(), sample_noise.cuda()
+                    output = backbone(sample_noise)
+                    loss = criterion(output, sample_noise)
+                else:
+                    sample, target = sample.cuda(), target.cuda()
+                    output = backbone(sample)
+                    loss = criterion(output, target)
+                # print(output.shape)
+                # print('#' * 30)
+
 
             loss.backward()
             optimizer.step()
@@ -210,20 +225,34 @@ def train():
                                        np.argmax(val_target.data.cpu().numpy(), 1))
 
                     else:
-                        val_sample, val_target = val_sample.cuda(), val_target.cuda()
-                        output = backbone(val_sample)
-                        val_loss = criterion_val(output, val_target)
+                        if task == 'denoise':
+                            val_sample_noisy =val_sample +  0.5 * torch.randn_like(val_sample)
+                            val_sample, val_target, val_sample_noisy  = val_sample.cuda(), val_target.cuda(),val_sample_noisy.cuda()
+                            output = backbone(val_sample_noisy)
+
+                            writer.add_images('Original Images', val_sample[:10], global_step=epoch+1)
+                            writer.add_images('Noisy Images', val_sample_noisy[:10], global_step=epoch+1)
+                            writer.add_images('Denoised Images', output[:10], global_step=epoch+1)
+
+                            val_loss = criterion_val(output, val_sample)
+                        else:
+                            val_sample, val_target = val_sample.cuda(), val_target.cuda()
+                            output = backbone(val_sample)
+                            val_loss = criterion_val(output, val_sample)
+                            _, predicted = torch.max(output.data, 1)
+                            total += val_target.size(0)
+                            correct += (predicted == val_target).sum().item()
 
                         val_loss_list.append(val_loss.item())
-                        _, predicted = torch.max(output.data, 1)
-                        total += val_target.size(0)
-                        correct += (predicted == val_target).sum().item()
+
 
 
             Train_ce = np.mean(loss_list)
             val_ce = np.mean(val_loss_list)
-            accuracy = correct / total
-
+            if task != 'denoise':
+                accuracy = correct / total
+            else:
+                accuracy = 0
             writer.add_scalar('Validation ce', val_ce, epoch + 1)
             writer.add_scalar('Validation accuracy', accuracy, epoch + 1)
 
